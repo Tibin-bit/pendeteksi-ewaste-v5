@@ -1,105 +1,211 @@
 import streamlit as st
 import google.generativeai as genai
+from PIL import Image
+import json
+import pandas as pd
+import plotly.express as px
+from datetime import datetime
 
-# Konfigurasi Halaman Streamlit
-st.set_page_config(page_title="Chatbot AI Gemini", page_icon="🤖", layout="centered")
-st.title("🤖 Chatbot AI Google Gemini")
+# ---------------------------------------------------------
+# 1. KONFIGURASI HALAMAN
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="Global AI E-Waste Detector Pro",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# 1. Mengambil API Key dari Streamlit Secrets atau Sidebar
-if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
-else:
-    api_key = st.sidebar.text_input("Masukkan Google Gemini API Key:", type="password")
+if "detection_history" not in st.session_state:
+    st.session_state.detection_history = []
 
-if not api_key:
-    st.warning("⚠️ Silakan masukkan **GEMINI_API_KEY** di menu Secrets Streamlit Cloud atau di sidebar untuk memulai.")
-    st.stop()
-
-# Konfigurasi SDK Google Gemini
-genai.configure(api_key=api_key)
-
-# 2. Fungsi Otomatis Mencari Model Terbaca & Aktif (ANTI 404)
-@st.cache_resource
-def get_active_gemini_model():
-    """
-    Mendeteksi secara otomatis model Gemini yang tersedia dan bisa digunakan
-    pada API Key yang terpasang agar tidak crash terkena Error 404.
-    """
-    try:
-        # Mengambil semua model yang mendukung 'generateContent'
-        available_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        
-        # Urutan prioritas model dari yang terbaru
-        preferred_models = [
-            "models/gemini-2.5-flash",
-            "models/gemini-2.0-flash",
-            "models/gemini-1.5-flash",
-            "models/gemini-1.5-pro",
-            "models/gemini-pro"
-        ]
-        
-        # Cek apakah ada model prioritas yang tersedia
-        for model_path in preferred_models:
-            if model_path in available_models:
-                return model_path
-                
-        # Jika nama model di daftar tidak pakai prefix 'models/'
-        for model_path in preferred_models:
-            clean_name = model_path.replace("models/", "")
-            for available in available_models:
-                if clean_name in available:
-                    return available
-
-        # Jika tidak ada match khusus, gunakan model pertama yang tersedia
-        if available_models:
-            return available_models[0]
-
-    except Exception as e:
-        st.sidebar.error(f"Gagal memuat daftar model: {e}")
+# ---------------------------------------------------------
+# 2. SIDEBAR CONFIGURATION
+# ---------------------------------------------------------
+with st.sidebar:
+    st.title("⚡ AI Core Settings")
+    st.caption("Universal E-Waste Detection System")
     
-    # Fallback default jika list_models gagal
-    return "gemini-2.5-flash"
+    api_key = st.text_input("Masukkan Gemini API Key:", type="password", help="Dapatkan API Key dari Google AI Studio")
+    
+    st.markdown("---")
+    st.markdown("### 📋 Standar Klasifikasi")
+    st.info("Menggunakan pedoman **UN Global E-Waste Monitor** untuk identifikasi bahaya dan daur ulang sampah elektronik.")
+    st.markdown("---")
+    st.caption("v3.3 Pro — Auto Model Discovery")
 
-# Deteksi Model
-active_model_name = get_active_gemini_model()
-st.sidebar.success(f"✅ Model terhubung: `{active_model_name}`")
+# ---------------------------------------------------------
+# 3. FUNGSI ANALISIS GAMBAR (OTOMATIS MENCARI MODEL AKTIF)
+# ---------------------------------------------------------
+def analyze_ewaste_smart(image, key):
+    genai.configure(api_key=key)
+    
+    prompt = """
+    Bertindaklah sebagai Ahli Pengolahan Sampah Elektronik (E-Waste Specialist) berstandar Internasional.
+    Analisis gambar ini dengan teliti dan berikan output STRICTLY dalam format JSON murni tanpa markdown formatting di luar JSON.
 
-# Inisialisasi GenerativeModel
-try:
-    model = genai.GenerativeModel(active_model_name)
-except Exception as e:
-    st.error(f"Gagal menghubungkan model `{active_model_name}`: {e}")
-    st.stop()
+    Struktur JSON yang wajib dihasilkan:
+    {
+        "nama_objek": "Nama spesifik perangkat/komponen elektronik pada gambar",
+        "kategori_un": "Salah satu dari 6 Kategori UN E-Waste (1. Temperature Exchange Equipment, 2. Screens & Monitors, 3. Lamps, 4. Large Equipment, 5. Small Equipment, 6. Small IT & Telecommunication)",
+        "deskripsi": "Deskripsi mendalam mengenai objek yang teridentifikasi",
+        "tingkat_bahaya": "Tinggi / Sedang / Rendah",
+        "skor_bahaya": 8,
+        "bahan_berbahaya": ["Contoh: Timbal", "Raksa", "Kadmium", "CFC/Freon"],
+        "potensi_logam_mulia": {
+            "Emas (Au)": "Ada / Tidak ada / Tinggi",
+            "Perak (Ag)": "Ada / Tidak ada / Sedang",
+            "Tembaga (Cu)": "Ada / Tinggi"
+        },
+        "instruksi_penanganan": [
+            "Langkah 1 penanganan aman",
+            "Langkah 2 pemisahan komponen",
+            "Langkah 3 opsi pembuangan/daur ulang"
+        ],
+        "dapat_didaur_ulang_persen": 75
+    }
+    """
+    
+    # Ambil daftar model yang aktif dari API Google
+    available_models = []
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name.replace("models/", ""))
+    except Exception:
+        pass
 
-# 3. Manajemen Riwayat Chat (Session State)
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    # Urutan prioritas model vision
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    
+    models_to_try = [m for m in candidate_models if m in available_models]
+    for m in candidate_models:
+        if m not in models_to_try:
+            models_to_try.append(m)
 
-# Tampilkan riwayat percakapan sebelumnya
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    response = None
+    last_error = ""
+    used_model = ""
 
-# 4. Input Pesan Pengguna
-if prompt := st.chat_input("Ketik pesan Anda di sini..."):
-    # Simpan dan tampilkan pesan pengguna
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    for m_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(m_name)
+            res = model.generate_content([prompt, image])
+            if res and res.text:
+                response = res
+                used_model = m_name
+                break
+        except Exception as e:
+            last_error = str(e)
+            continue
 
-    # Kirim ke Gemini API dan tampilkan respon
-    with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        with st.spinner("Gemini sedang berpikir..."):
-            try:
-                response = model.generate_content(prompt)
-                response_text = response.text
-                response_placeholder.markdown(response_text)
+    if response is None:
+        return None, None, f"Gagal menganalisis gambar. Detail error: {last_error}"
+
+    try:
+        clean_text = response.text.replace("```json", "").replace("```", "").strip()
+        parsed_data = json.loads(clean_text)
+        return parsed_data, used_model, None
+    except Exception as e:
+        return None, used_model, f"Gagal memproses format data AI: {str(e)}"
+
+# ---------------------------------------------------------
+# 4. TAMPILAN UTAMA APLIKASI
+# ---------------------------------------------------------
+st.title("⚡ Global AI E-Waste Detector Pro")
+st.markdown("Sistem Pengenal & Analisis Bahaya Sampah Elektronik Berbasis Vision AI")
+
+tab1, tab2 = st.tabs(["🔍 Analisis E-Waste", "📊 Dashboard & Riwayat"])
+
+# --- TAB 1: ANALISIS ---
+with tab1:
+    col_input, col_output = st.columns([1, 1.2], gap="medium")
+    
+    with col_input:
+        st.subheader("1. Pilih Sumber Gambar")
+        source = st.radio("Metode Input:", ["Kamera Langsung 📷", "Unggah Berkas 📁"], horizontal=True)
+        
+        input_image = None
+        if "Kamera" in source:
+            cam_file = st.camera_input("Ambil Foto Perangkat E-Waste")
+            if cam_file:
+                input_image = Image.open(cam_file)
+        else:
+            uploaded_file = st.file_uploader("Pilih gambar perangkat (JPG, PNG, WEBP):", type=["jpg", "jpeg", "png", "webp"])
+            if uploaded_file:
+                input_image = Image.open(uploaded_file)
                 
-                # Simpan respon asisten ke riwayat
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
-            except Exception as e:
-                response_placeholder.error(f"Terjadi kesalahan saat memproses respon: {e}")
+        if input_image:
+            st.image(input_image, caption="Gambar Siap Dianalisis", use_container_width=True)
+            analyze_btn = st.button("🚀 Jalankan Analisis AI Universal", type="primary", use_container_width=True)
+
+    with col_output:
+        st.subheader("2. Hasil Deteksi & Analisis Mendalam")
+        
+        if 'analyze_btn' in locals() and analyze_btn:
+            if not api_key:
+                st.error("⚠️ **API Key Belum Diisi!** Masukkan Gemini API Key pada menu sidebar di sebelah kiri.")
+            elif input_image is None:
+                st.warning("⚠️ **Gambar Belum Ada!** Ambil foto atau unggah gambar terlebih dahulu.")
+            else:
+                with st.spinner("🧠 Menganalisis gambar e-waste..."):
+                    data, active_model, err = analyze_ewaste_smart(input_image, api_key)
+                    
+                    if err:
+                        st.error(f"❌ {err}")
+                    else:
+                        st.session_state.detection_history.append({
+                            "waktu": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "nama": data.get("nama_objek", "Tidak diketahui"),
+                            "kategori": data.get("kategori_un", "Umum"),
+                            "bahaya": data.get("tingkat_bahaya", "Sedang"),
+                            "daur_ulang": data.get("dapat_didaur_ulang_persen", 0),
+                            "model": active_model
+                        })
+                        
+                        st.success(f"✅ **Berhasil Dianalisis** (Model Digunakan: `{active_model}`)")
+                        
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Perangkat Terdeteksi", data.get("nama_objek", "-"))
+                        m2.metric("Tingkat Bahaya", data.get("tingkat_bahaya", "-"), delta=f"Skor {data.get('skor_bahaya', 0)}/10", delta_color="inverse")
+                        m3.metric("Potensi Daur Ulang", f"{data.get('dapat_didaur_ulang_persen', 0)}%")
+                        
+                        st.markdown("---")
+                        st.markdown(f"**📂 Kategori UN E-Waste:** `{data.get('kategori_un', '-')}`")
+                        st.markdown(f"**📝 Deskripsi Objek:** {data.get('deskripsi', '-')}")
+                        
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.markdown("🚨 **Bahan / Zat Berbahaya:**")
+                            for bahan in data.get("bahan_berbahaya", []):
+                                st.write(f"- {bahan}")
+                                
+                        with col_b:
+                            st.markdown("💎 **Potensi Logam Mulia:**")
+                            lm = data.get("potensi_logam_mulia", {})
+                            for k, v in lm.items():
+                                st.write(f"- **{k}:** {v}")
+                                
+                        st.markdown("---")
+                        st.markdown("🛠️ **Instruksi Penanganan & Daur Ulang Aman:**")
+                        for idx, step in enumerate(data.get("instruksi_penanganan", []), 1):
+                            st.write(f"**{idx}.** {step}")
+
+# --- TAB 2: DASHBOARD ---
+with tab2:
+    st.subheader("📊 Rekapitulasi Deteksi E-Waste")
+    
+    if len(st.session_state.detection_history) > 0:
+        df = pd.DataFrame(st.session_state.detection_history)
+        st.dataframe(df, use_container_width=True)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_pie = px.pie(df, names="kategori", title="Distribusi Kategori UN E-Waste", hole=0.4)
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        with c2:
+            fig_bar = px.bar(df, x="nama", y="daur_ulang", color="bahaya", title="Persentase Daur Ulang per Objek")
+            st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+        st.info("Belum ada riwayat deteksi pada sesi ini. Lakukan deteksi di Tab 1 untuk melihat dashboard.")
